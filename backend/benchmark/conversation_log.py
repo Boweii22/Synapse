@@ -234,4 +234,4 @@ def build_probes() -> list[Probe]:
     ]
 
 
-PROBE_CHECKPOINT_DAYS = [4, 10, 16, 18, 20, 26, 32, 36, 42]
+PROBE_CHECKPOINT_DAYS = [4, 16, 24, 36, 42]

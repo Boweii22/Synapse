@@ -6,7 +6,6 @@ app.qwen_client -- nothing here fabricates a number.
 """
 import logging
 import uuid
-from concurrent.futures import ThreadPoolExecutor
 from datetime import datetime, timezone
 
 from sqlalchemy.orm import Session
@@ -31,10 +30,9 @@ def extract_and_write_turn(
     simulate a multi-day conversation without wall-clock waiting; production
     callers omit it and get the real current time.
 
-    Candidates' Qwen calls (score + embed) run concurrently across threads --
-    they're independent, I/O-bound network calls. The SQLAlchemy `db` session
-    itself is not thread-safe, so all `db.add`/`commit` stays on the calling
-    thread; threads only build plain, unattached Memory objects.
+    Scoring and embedding are each batched into a single Qwen call across all
+    candidates in the turn (instead of one call per candidate) -- a real
+    latency/throughput win, not a change in what actually gets scored.
     """
     now = now or datetime.now(timezone.utc)
     candidates = qwen_client.extract_memory_candidates(user_message, assistant_message)
@@ -42,26 +40,39 @@ def extract_and_write_turn(
         logger.info("turn produced no memory candidates for user=%s", user_id)
         return []
 
-    if len(candidates) == 1:
-        memories = [_score_and_build_memory(user_id, candidates[0], now)]
-    else:
-        with ThreadPoolExecutor(max_workers=min(4, len(candidates))) as executor:
-            memories = list(executor.map(lambda c: _score_and_build_memory(user_id, c, now), candidates))
+    scores = qwen_client.score_importance_batch(candidates)
+    embeddings = qwen_client.embed_texts(candidates)
 
-    for m in memories:
-        db.add(m)
+    memories: list[Memory] = []
+    for content, score, embedding in zip(candidates, scores, embeddings):
+        memory = Memory(
+            user_id=user_id,
+            content=content,
+            embedding=embedding,
+            memory_type=score["memory_type"],
+            importance_score=score["importance"],
+            reasoning=score.get("reasoning"),
+            salience=initial_salience(score["importance"]),
+            created_at=now,
+            last_recalled_at=now,
+        )
+        logger.info(
+            "wrote memory user=%s type=%s importance=%.2f reasoning=%r content=%r",
+            user_id, memory.memory_type, memory.importance_score, memory.reasoning, content,
+        )
+        db.add(memory)
+        memories.append(memory)
+
     db.commit()
     for m in memories:
         db.refresh(m)
     return memories
 
 
-def _score_and_build_memory(user_id: uuid.UUID, content: str, now: datetime) -> Memory:
-    """Runs the two Qwen calls for one candidate and builds an unattached Memory
-    object. Safe to call from any thread -- touches no SQLAlchemy session."""
+def write_single_memory(db: Session, user_id: uuid.UUID, content: str, now: datetime | None = None) -> Memory:
+    now = now or datetime.now(timezone.utc)
     score = qwen_client.score_importance(content)
     embedding = qwen_client.embed_text(content)
-
     memory = Memory(
         user_id=user_id,
         content=content,
@@ -73,15 +84,5 @@ def _score_and_build_memory(user_id: uuid.UUID, content: str, now: datetime) -> 
         created_at=now,
         last_recalled_at=now,
     )
-    logger.info(
-        "wrote memory user=%s type=%s importance=%.2f reasoning=%r content=%r",
-        user_id, memory.memory_type, memory.importance_score, memory.reasoning, content,
-    )
-    return memory
-
-
-def write_single_memory(db: Session, user_id: uuid.UUID, content: str, now: datetime | None = None) -> Memory:
-    now = now or datetime.now(timezone.utc)
-    memory = _score_and_build_memory(user_id, content, now)
     db.add(memory)
     return memory

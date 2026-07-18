@@ -58,16 +58,14 @@ class NaiveAgent:
         self.user_id = user_id
         self.top_k = top_k
 
-    def _write_raw(self, db, text: str, now: datetime) -> None:
-        embedding = qwen_client.embed_text(text)
-        db.add(NaiveMemory(user_id=self.user_id, content=text, embedding=embedding, created_at=now))
-
     def write_turn(self, user_message: str, assistant_message: str, now: datetime | None = None) -> None:
         now = now or datetime.now(timezone.utc)
+        texts = [f"User said: {user_message}", f"Assistant replied: {assistant_message}"]
+        embeddings = qwen_client.embed_texts(texts)  # one batched call instead of two
         db = NaiveSession()
         try:
-            self._write_raw(db, f"User said: {user_message}", now)
-            self._write_raw(db, f"Assistant replied: {assistant_message}", now)
+            for text, embedding in zip(texts, embeddings):
+                db.add(NaiveMemory(user_id=self.user_id, content=text, embedding=embedding, created_at=now))
             db.commit()
         finally:
             db.close()

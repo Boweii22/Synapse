@@ -109,6 +109,41 @@ def score_importance(candidate_text: str) -> dict:
     return result
 
 
+BATCH_IMPORTANCE_SYSTEM_PROMPT = """You are the memory-importance scorer inside a personal AI \
+assistant's long-term memory system. You will be given a JSON list of candidate memory texts \
+extracted from a conversation. Score each one independently on:
+- Explicit signal: did the user explicitly ask to remember/not forget this? (strong signal, not required)
+- Decision-relevance: is this the kind of fact that should change the assistant's future \
+behavior -- an ongoing project, a stated preference, a constraint, an unresolved task -- \
+versus a passing remark with no lasting relevance?
+- Specificity: concrete, checkable facts score higher than vague chit-chat.
+
+Respond with strict JSON only, matching this exact shape, with one entry per input candidate \
+IN THE SAME ORDER:
+{"scores": [{"importance": <float 0.0-1.0>, "memory_type": "episodic" | "semantic", "reasoning": "<one sentence>"}, ...]}
+
+"semantic" = a stable fact/preference/trait that will likely still be true in a month.
+"episodic" = a specific event/detail tied to this particular conversation/moment.
+"""
+
+
+def score_importance_batch(candidate_texts: list[str]) -> list[dict]:
+    """Scores multiple candidates in a single call instead of one call each --
+    a real latency/throughput optimization, not a change in what gets scored."""
+    if not candidate_texts:
+        return []
+    prompt = json.dumps(candidate_texts)
+    result = chat_json(BATCH_IMPORTANCE_SYSTEM_PROMPT, prompt)
+    if not isinstance(result, dict) or "scores" not in result or len(result["scores"]) != len(candidate_texts):
+        raise ValueError(f"Qwen returned malformed batch importance result: {result!r}")
+    scores = result["scores"]
+    for s in scores:
+        s["importance"] = max(0.0, min(1.0, float(s["importance"])))
+        if s.get("memory_type") not in ("episodic", "semantic"):
+            raise ValueError(f"Qwen returned invalid memory_type: {s!r}")
+    return scores
+
+
 EXTRACTION_SYSTEM_PROMPT = """You are the memory-extraction module inside a personal AI \
 assistant. Given one turn of conversation (a user message and the assistant's reply), \
 identify any discrete facts worth remembering long-term: stated preferences, ongoing \

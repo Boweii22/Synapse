@@ -34,8 +34,8 @@ def _active_memories(db: Session, user_id: uuid.UUID, memory_type: str | None = 
     return list(db.execute(stmt).scalars().all())
 
 
-def cluster_episodic_memories(memories: list[Memory]) -> list[list[Memory]]:
-    """Group episodic memories whose embeddings are similar above the configured
+def cluster_memories_by_similarity(memories: list[Memory]) -> list[list[Memory]]:
+    """Group memories whose embeddings are similar above the configured
     threshold, using agglomerative clustering over cosine distance. Returns only
     clusters that meet the minimum cluster size."""
     if len(memories) < _settings.consolidation_min_cluster_size:
@@ -62,43 +62,53 @@ def cluster_episodic_memories(memories: list[Memory]) -> list[list[Memory]]:
 
 
 def consolidate_clusters(db: Session, user_id: uuid.UUID) -> list[Memory]:
-    """Find repeating episodic clusters and merge each into one consolidated
-    semantic memory. Returns the newly created consolidated Memory rows."""
+    """Find repeating memories -- both episodic (repeated event mentions) and
+    semantic (the same stated fact/preference re-extracted on separate turns,
+    worded slightly differently each time) -- and merge each cluster into one
+    consolidated memory. Returns the newly created consolidated Memory rows.
+
+    Deduping semantic repeats here (not just episodic ones) matters: without
+    it, near-duplicate semantic memories never merge, and the supersession
+    pairwise-comparison pass below has to keep re-scanning an ever-growing
+    pool of them on every single consolidation trigger.
+    """
     now = datetime.now(timezone.utc)
-    episodic = _active_memories(db, user_id, memory_type="episodic")
-    clusters = cluster_episodic_memories(episodic)
-
     created: list[Memory] = []
-    for cluster in clusters:
-        contents = [m.content for m in cluster]
-        result = qwen_client.consolidate_cluster(contents)
-        consolidated_text = result["consolidated_memory"]
 
-        score = qwen_client.score_importance(consolidated_text)
-        embedding = qwen_client.embed_text(consolidated_text)
+    for source_type in ("episodic", "semantic"):
+        candidates = _active_memories(db, user_id, memory_type=source_type)
+        clusters = cluster_memories_by_similarity(candidates)
 
-        consolidated = Memory(
-            user_id=user_id,
-            content=consolidated_text,
-            embedding=embedding,
-            memory_type="consolidated",
-            importance_score=score["importance"],
-            reasoning=result.get("reasoning") or score.get("reasoning"),
-            source_memory_ids=[m.id for m in cluster],
-            salience=initial_salience(score["importance"]),
-        )
-        db.add(consolidated)
+        for cluster in clusters:
+            contents = [m.content for m in cluster]
+            result = qwen_client.consolidate_cluster(contents)
+            consolidated_text = result["consolidated_memory"]
 
-        for m in cluster:
-            m.is_active = False
-            m.pruned_at = now
-            m.pruned_reason = "consolidated"
+            score = qwen_client.score_importance(consolidated_text)
+            embedding = qwen_client.embed_text(consolidated_text)
 
-        logger.info(
-            "consolidated %d episodic memories into one for user=%s: %r",
-            len(cluster), user_id, consolidated_text,
-        )
-        created.append(consolidated)
+            consolidated = Memory(
+                user_id=user_id,
+                content=consolidated_text,
+                embedding=embedding,
+                memory_type="consolidated",
+                importance_score=score["importance"],
+                reasoning=result.get("reasoning") or score.get("reasoning"),
+                source_memory_ids=[m.id for m in cluster],
+                salience=initial_salience(score["importance"]),
+            )
+            db.add(consolidated)
+
+            for m in cluster:
+                m.is_active = False
+                m.pruned_at = now
+                m.pruned_reason = "consolidated"
+
+            logger.info(
+                "consolidated %d %s memories into one for user=%s: %r",
+                len(cluster), source_type, user_id, consolidated_text,
+            )
+            created.append(consolidated)
 
     if created:
         db.commit()

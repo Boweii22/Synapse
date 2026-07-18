@@ -80,6 +80,28 @@ def chat_json(system_prompt: str, user_prompt: str, temperature: float = 0.2) ->
     return _extract_json(raw)
 
 
+def _chat_json_retrying(system_prompt: str, user_prompt: str, validate, temperature: float = 0.2, max_attempts: int = 3):
+    """Like chat_json, but also retries when the response parses as JSON yet has the
+    wrong shape (e.g. `{}` instead of `{"candidates": [...]}`) -- chat_json's own
+    @retry only covers network/parse failures, not a successfully-returned response
+    that just doesn't match the expected schema. Smaller/faster models are more
+    prone to this than larger ones, so this matters more since switching to a
+    faster chat model tier for benchmark throughput. `validate(result)` should
+    raise ValueError/KeyError/TypeError on a bad shape; still raises after
+    max_attempts so a persistent failure is loud, not silently swallowed.
+    """
+    last_err: Exception | None = None
+    for attempt in range(1, max_attempts + 1):
+        try:
+            result = chat_json(system_prompt, user_prompt, temperature=temperature)
+            validate(result)
+            return result
+        except (ValueError, KeyError, TypeError) as e:
+            last_err = e
+            logger.warning("qwen structured response had unexpected shape (attempt %d/%d): %s", attempt, max_attempts, e)
+    raise last_err
+
+
 IMPORTANCE_SYSTEM_PROMPT = """You are the memory-importance scorer inside a personal AI \
 assistant's long-term memory system. Given a single piece of candidate memory text \
 extracted from a conversation, score how important it is to retain long-term.
@@ -99,13 +121,16 @@ Respond with strict JSON only, matching this exact shape:
 """
 
 
-def score_importance(candidate_text: str) -> dict:
-    result = chat_json(IMPORTANCE_SYSTEM_PROMPT, candidate_text)
+def _validate_importance(result):
     if not isinstance(result, dict) or "importance" not in result:
         raise ValueError(f"Qwen returned malformed importance score: {result!r}")
-    result["importance"] = max(0.0, min(1.0, float(result["importance"])))
     if result.get("memory_type") not in ("episodic", "semantic"):
         raise ValueError(f"Qwen returned invalid memory_type: {result!r}")
+
+
+def score_importance(candidate_text: str) -> dict:
+    result = _chat_json_retrying(IMPORTANCE_SYSTEM_PROMPT, candidate_text, _validate_importance)
+    result["importance"] = max(0.0, min(1.0, float(result["importance"])))
     return result
 
 
@@ -133,14 +158,18 @@ def score_importance_batch(candidate_texts: list[str]) -> list[dict]:
     if not candidate_texts:
         return []
     prompt = json.dumps(candidate_texts)
-    result = chat_json(BATCH_IMPORTANCE_SYSTEM_PROMPT, prompt)
-    if not isinstance(result, dict) or "scores" not in result or len(result["scores"]) != len(candidate_texts):
-        raise ValueError(f"Qwen returned malformed batch importance result: {result!r}")
+
+    def validate(result):
+        if not isinstance(result, dict) or "scores" not in result or len(result["scores"]) != len(candidate_texts):
+            raise ValueError(f"Qwen returned malformed batch importance result: {result!r}")
+        for s in result["scores"]:
+            if s.get("memory_type") not in ("episodic", "semantic"):
+                raise ValueError(f"Qwen returned invalid memory_type: {s!r}")
+
+    result = _chat_json_retrying(BATCH_IMPORTANCE_SYSTEM_PROMPT, prompt, validate)
     scores = result["scores"]
     for s in scores:
         s["importance"] = max(0.0, min(1.0, float(s["importance"])))
-        if s.get("memory_type") not in ("episodic", "semantic"):
-            raise ValueError(f"Qwen returned invalid memory_type: {s!r}")
     return scores
 
 
@@ -163,11 +192,14 @@ facts that were not stated.
 """
 
 
-def extract_memory_candidates(user_message: str, assistant_message: str) -> list[str]:
-    prompt = f"User: {user_message}\n\nAssistant: {assistant_message}"
-    result = chat_json(EXTRACTION_SYSTEM_PROMPT, prompt)
+def _validate_extraction(result):
     if not isinstance(result, dict) or "candidates" not in result:
         raise ValueError(f"Qwen returned malformed extraction result: {result!r}")
+
+
+def extract_memory_candidates(user_message: str, assistant_message: str) -> list[str]:
+    prompt = f"User: {user_message}\n\nAssistant: {assistant_message}"
+    result = _chat_json_retrying(EXTRACTION_SYSTEM_PROMPT, prompt, _validate_extraction)
     return [c for c in result["candidates"] if isinstance(c, str) and c.strip()]
 
 
@@ -184,12 +216,14 @@ old one about the same subject. Do not mark true for merely related or additive 
 """
 
 
-def detect_supersession(existing_memory: str, new_memory: str) -> dict:
-    prompt = f"Existing memory: {existing_memory}\n\nNew candidate memory: {new_memory}"
-    result = chat_json(CONTRADICTION_SYSTEM_PROMPT, prompt)
+def _validate_supersession(result):
     if not isinstance(result, dict) or "supersedes" not in result:
         raise ValueError(f"Qwen returned malformed supersession result: {result!r}")
-    return result
+
+
+def detect_supersession(existing_memory: str, new_memory: str) -> dict:
+    prompt = f"Existing memory: {existing_memory}\n\nNew candidate memory: {new_memory}"
+    return _chat_json_retrying(CONTRADICTION_SYSTEM_PROMPT, prompt, _validate_supersession)
 
 
 CONSOLIDATION_SYSTEM_PROMPT = """You are the memory-consolidation module inside a \
@@ -203,12 +237,14 @@ Respond with strict JSON only:
 """
 
 
-def consolidate_cluster(memory_contents: list[str]) -> dict:
-    prompt = "\n".join(f"- {m}" for m in memory_contents)
-    result = chat_json(CONSOLIDATION_SYSTEM_PROMPT, prompt)
+def _validate_consolidation(result):
     if not isinstance(result, dict) or "consolidated_memory" not in result:
         raise ValueError(f"Qwen returned malformed consolidation result: {result!r}")
-    return result
+
+
+def consolidate_cluster(memory_contents: list[str]) -> dict:
+    prompt = "\n".join(f"- {m}" for m in memory_contents)
+    return _chat_json_retrying(CONSOLIDATION_SYSTEM_PROMPT, prompt, _validate_consolidation)
 
 
 JUDGE_SYSTEM_PROMPT = """You are an LLM judge for a memory-recall benchmark (this is \
@@ -225,9 +261,11 @@ Respond with strict JSON only:
 """
 
 
-def judge_recall(question: str, expected_answer: str, agent_reply: str) -> dict:
-    prompt = f"Question: {question}\nCurrently-correct answer: {expected_answer}\nAssistant's reply: {agent_reply}"
-    result = chat_json(JUDGE_SYSTEM_PROMPT, prompt)
+def _validate_judge(result):
     if not isinstance(result, dict) or "correct" not in result:
         raise ValueError(f"Qwen judge returned malformed result: {result!r}")
-    return result
+
+
+def judge_recall(question: str, expected_answer: str, agent_reply: str) -> dict:
+    prompt = f"Question: {question}\nCurrently-correct answer: {expected_answer}\nAssistant's reply: {agent_reply}"
+    return _chat_json_retrying(JUDGE_SYSTEM_PROMPT, prompt, _validate_judge)

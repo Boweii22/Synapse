@@ -99,7 +99,14 @@ def run(turns_limit: int | None = None, checkpoint_days: list[int] | None = None
             {"role": "system", "content": system_prompt},
             {"role": "user", "content": turn.user_message},
         ])
-        extract_and_write_turn(db, synapse_user_id, turn.user_message, synapse_reply, now=now)
+        try:
+            extract_and_write_turn(db, synapse_user_id, turn.user_message, synapse_reply, now=now)
+        except Exception:
+            logger.exception(
+                "turn=%d day=%d: memory extraction/write failed after retries -- skipping this turn's writes, continuing run",
+                turn.index, turn.day,
+            )
+            db.rollback()
 
         synapse_tokens = count_tokens(system_prompt)
         synapse_active = active_memory_count(db, synapse_user_id)
@@ -119,43 +126,55 @@ def run(turns_limit: int | None = None, checkpoint_days: list[int] | None = None
 
         if synapse_active and synapse_active % _settings.consolidation_trigger_every_n_writes == 0:
             logger.info("day=%d turn=%d: triggering consolidation pass (active=%d)", turn.day, turn.index, synapse_active)
-            consolidation.run_consolidation_pass(db, synapse_user_id)
-            decay.run_decay_and_prune(db, now=now)
+            try:
+                consolidation.run_consolidation_pass(db, synapse_user_id)
+                decay.run_decay_and_prune(db, now=now)
+            except Exception:
+                logger.exception("turn=%d day=%d: consolidation pass failed after retries -- skipping, continuing run", turn.index, turn.day)
+                db.rollback()
 
         if is_last_turn_of_day:
-            decay.run_decay_and_prune(db, now=now)  # simulated "nightly" pass
+            try:
+                decay.run_decay_and_prune(db, now=now)  # simulated "nightly" pass
+            except Exception:
+                logger.exception("turn=%d day=%d: nightly decay pass failed -- skipping, continuing run", turn.index, turn.day)
+                db.rollback()
 
         if turn.day in checkpoint_days and is_last_turn_of_day:
             for probe in probes:
-                expected = probe.answer_at(turn.day)
+                try:
+                    expected = probe.answer_at(turn.day)
 
-                n_future = executor.submit(naive.ask_readonly, probe.question)
+                    n_future = executor.submit(naive.ask_readonly, probe.question)
 
-                s_recalled = retrieve_for_query(db, synapse_user_id, probe.question, now=now, bump=False)
-                s_prompt = _build_system_prompt(s_recalled)
-                s_reply = qwen_client.chat([
-                    {"role": "system", "content": s_prompt},
-                    {"role": "user", "content": probe.question},
-                ])
-                s_judged = qwen_client.judge_recall(probe.question, expected, s_reply)
+                    s_recalled = retrieve_for_query(db, synapse_user_id, probe.question, now=now, bump=False)
+                    s_prompt = _build_system_prompt(s_recalled)
+                    s_reply = qwen_client.chat([
+                        {"role": "system", "content": s_prompt},
+                        {"role": "user", "content": probe.question},
+                    ])
+                    s_judged = qwen_client.judge_recall(probe.question, expected, s_reply)
 
-                n_reply, _ = n_future.result()
-                n_judged = qwen_client.judge_recall(probe.question, expected, n_reply)
+                    n_reply, _ = n_future.result()
+                    n_judged = qwen_client.judge_recall(probe.question, expected, n_reply)
 
-                checkpoint_records.append({
-                    "day": turn.day,
-                    "question": probe.question,
-                    "category": probe.category,
-                    "expected": expected,
-                    "synapse_reply": s_reply,
-                    "synapse_correct": bool(s_judged["correct"]),
-                    "naive_reply": n_reply,
-                    "naive_correct": bool(n_judged["correct"]),
-                })
-                logger.info(
-                    "probe day=%d q=%r expected=%r synapse_correct=%s naive_correct=%s",
-                    turn.day, probe.question, expected, s_judged["correct"], n_judged["correct"],
-                )
+                    checkpoint_records.append({
+                        "day": turn.day,
+                        "question": probe.question,
+                        "category": probe.category,
+                        "expected": expected,
+                        "synapse_reply": s_reply,
+                        "synapse_correct": bool(s_judged["correct"]),
+                        "naive_reply": n_reply,
+                        "naive_correct": bool(n_judged["correct"]),
+                    })
+                    logger.info(
+                        "probe day=%d q=%r expected=%r synapse_correct=%s naive_correct=%s",
+                        turn.day, probe.question, expected, s_judged["correct"], n_judged["correct"],
+                    )
+                except Exception:
+                    logger.exception("day=%d probe=%r failed after retries -- skipping this probe, continuing run", turn.day, probe.question)
+                    db.rollback()
 
     executor.shutdown(wait=True)
     db.close()

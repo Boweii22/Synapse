@@ -4,6 +4,18 @@ A personal AI assistant with long-term memory that actually forgets. Built for t
 
 Almost every "memory agent" does the same thing: embed every message, dump it in a vector DB, retrieve top-k by cosine similarity forever. That's a search index, not memory — it never forgets anything, weighs a passing comment about the weather the same as "I'm allergic to penicillin," and gets noisier and slower the longer you use it. Synapse instead scores importance at write time, decays salience over time at a rate that depends on whether a memory is episodic or semantic, consolidates repeating episodic patterns into single semantic memories, and retires memories that get directly contradicted by newer information — and proves all of it works with a real benchmark against a naive baseline, not just a claim.
 
+### Why forgetting is the hard part
+
+It sounds backwards: shouldn't an AI assistant that remembers *more* be better? In practice, no — and this is the part almost nobody builds.
+
+Think about how your own memory works. You don't recall every sentence anyone's ever said to you with equal weight — you remember your allergies, your family, stable facts about your life, and you let a random Tuesday's small talk fade. That selective forgetting is what makes memory *useful*. Remove it, and you get three concrete failure modes:
+
+1. **It gets slower and dumber, not smarter, the longer you use it.** Every "lol nice," every passing comment, gets stored forever with the same weight as a real fact. Eventually the assistant has to search a mountain of accumulated noise to find the one thing that matters — more storage, worse recall.
+2. **It can confidently give you the wrong answer.** Tell it "I live in Berlin," then months later "I just moved to Lisbon" — a system with no concept of contradiction now has *both* facts sitting there with similar relevance, and may resurface the stale one. This isn't hypothetical: it's exactly what our benchmark measures, and exactly where the naive baseline fails and Synapse doesn't.
+3. **It gets more expensive and less accurate over time**, mechanically — every stored memory adds tokens to the context window and noise to retrieval, so an ever-growing pile of unforgotten trivia makes every future query slower and costlier to answer well.
+
+Synapse's decay + consolidation + contradiction-detection pipeline exists to solve exactly this: keep what still matters, merge what's repetitive, retire what's been overtaken by newer information — so the assistant gets *more* useful the longer you use it, not more cluttered.
+
 - Scores every memory's importance with a real Qwen call at write time, with the reasoning logged
 - Decays salience over time — stable facts fade slowly, one-off details fade fast unless reinforced
 - Consolidates repeating episodic mentions into one semantic memory during a periodic "sleep" pass

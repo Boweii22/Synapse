@@ -2,11 +2,50 @@ import { AnimatePresence, motion } from "framer-motion";
 import { useCallback, useEffect, useRef, useState } from "react";
 import { listMemories, runConsolidation, runDecay } from "../api";
 import BenchmarkChart from "./BenchmarkChart";
+import DecayProjection from "./DecayProjection";
 import MemoryHistoryChart from "./MemoryHistoryChart";
 import TypeDistribution from "./TypeDistribution";
 
 const POLL_MS = 5000;
 const HISTORY_LIMIT = 120;
+
+const TIERS = [
+  { key: "strong", label: "Strong", test: (s) => s >= 0.7 },
+  { key: "fading", label: "Fading", test: (s) => s >= 0.15 && s < 0.7 },
+  { key: "weak", label: "Weak, near the prune floor", test: (s) => s < 0.15 },
+];
+
+function MemoryCard({ m, pulsing }) {
+  return (
+    <motion.div
+      layout
+      key={m.id}
+      initial={{ opacity: 0, y: 8, scale: 0.98 }}
+      animate={{ opacity: 1, y: 0, scale: 1 }}
+      exit={{ opacity: 0, x: 24, scale: 0.97, transition: { duration: 0.2 } }}
+      transition={{ type: "spring", stiffness: 380, damping: 32 }}
+      className={`memory-card ${m.memory_type} ${pulsing ? "pulse" : ""}`}
+    >
+      <div className="memory-card-header">
+        <span className={`type-chip ${m.memory_type}`}>{m.memory_type}</span>
+        <span className="salience-label">{m.salience.toFixed(3)}</span>
+      </div>
+      <p className="memory-content">{m.content}</p>
+      <div className="salience-bar-track">
+        <motion.div
+          className={`salience-bar-fill ${m.memory_type}`}
+          animate={{ width: `${Math.min(100, m.salience * 100)}%` }}
+          transition={{ duration: 0.5, ease: "easeOut" }}
+        />
+      </div>
+      <DecayProjection salience={m.salience} memoryType={m.memory_type} />
+      <div className="memory-meta">
+        importance {m.importance_score.toFixed(2)} &middot; recalled {m.recall_count}&times; &middot; last{" "}
+        {new Date(m.last_recalled_at).toLocaleString()}
+      </div>
+    </motion.div>
+  );
+}
 
 export default function MemoryTimeline({ userId }) {
   const [memories, setMemories] = useState([]);
@@ -117,63 +156,56 @@ export default function MemoryTimeline({ userId }) {
           <h3>
             Active memories <span className="count-pill">{active.length}</span>
           </h3>
-          <div className="memory-list">
-            <AnimatePresence initial={false}>
-              {active.map((m) => (
-                <motion.div
-                  layout
-                  key={m.id}
-                  initial={{ opacity: 0, y: 8, scale: 0.98 }}
-                  animate={{ opacity: 1, y: 0, scale: 1 }}
-                  exit={{ opacity: 0, x: 24, scale: 0.97, transition: { duration: 0.2 } }}
-                  transition={{ type: "spring", stiffness: 380, damping: 32 }}
-                  className={`memory-card ${m.memory_type} ${changedIds.has(m.id) ? "pulse" : ""}`}
-                >
-                  <div className="memory-card-header">
-                    <span className={`type-chip ${m.memory_type}`}>{m.memory_type}</span>
-                    <span className="salience-label">{m.salience.toFixed(3)}</span>
+          <div className="tiered-list">
+            {TIERS.map((tier) => {
+              const items = active.filter((m) => tier.test(m.salience));
+              if (items.length === 0) return null;
+              return (
+                <div key={tier.key} className="tier-section">
+                  <div className={`tier-label ${tier.key}`}>
+                    <span className="tier-dot" />
+                    {tier.label}
+                    <span className="tier-count">{items.length}</span>
                   </div>
-                  <p className="memory-content">{m.content}</p>
-                  <div className="salience-bar-track">
-                    <motion.div
-                      className={`salience-bar-fill ${m.memory_type}`}
-                      animate={{ width: `${Math.min(100, m.salience * 100)}%` }}
-                      transition={{ duration: 0.5, ease: "easeOut" }}
-                    />
+                  <div className="memory-list">
+                    <AnimatePresence initial={false}>
+                      {items.map((m) => (
+                        <MemoryCard key={m.id} m={m} pulsing={changedIds.has(m.id)} />
+                      ))}
+                    </AnimatePresence>
                   </div>
-                  <div className="memory-meta">
-                    importance {m.importance_score.toFixed(2)} &middot; recalled {m.recall_count}&times; &middot; last{" "}
-                    {new Date(m.last_recalled_at).toLocaleString()}
-                  </div>
-                </motion.div>
-              ))}
-            </AnimatePresence>
+                </div>
+              );
+            })}
             {active.length === 0 && <p className="empty-state-small">No active memories yet -- chat with Synapse first.</p>}
           </div>
         </section>
 
         <section className="timeline-column">
           <h3>Recently decayed / pruned / consolidated</h3>
-          <div className="memory-list">
+          <div className="decay-timeline">
             <AnimatePresence initial={false}>
               {recentlyChanged.map((m) => (
                 <motion.div
                   layout
                   key={m.id}
-                  initial={{ opacity: 0, y: -6 }}
-                  animate={{ opacity: 1, y: 0 }}
+                  initial={{ opacity: 0, x: -10 }}
+                  animate={{ opacity: 1, x: 0 }}
                   exit={{ opacity: 0 }}
                   transition={{ type: "spring", stiffness: 380, damping: 32 }}
-                  className="memory-card faded"
+                  className="decay-timeline-item"
                 >
-                  <div className="memory-card-header">
-                    <span className={`type-chip ${m.memory_type}`}>{m.memory_type}</span>
-                    <span className={`pruned-chip ${m.pruned_reason}`}>{m.pruned_reason}</span>
-                  </div>
-                  <p className="memory-content strike">{m.content}</p>
-                  <div className="memory-meta">
-                    {m.pruned_at && `pruned ${new Date(m.pruned_at).toLocaleString()}`}
-                    {m.source_memory_ids?.length > 0 && ` -- merged from ${m.source_memory_ids.length} memories`}
+                  <span className={`decay-timeline-dot ${m.pruned_reason}`} />
+                  <div className="memory-card faded">
+                    <div className="memory-card-header">
+                      <span className={`type-chip ${m.memory_type}`}>{m.memory_type}</span>
+                      <span className={`pruned-chip ${m.pruned_reason}`}>{m.pruned_reason}</span>
+                    </div>
+                    <p className="memory-content strike">{m.content}</p>
+                    <div className="memory-meta">
+                      {m.pruned_at && `pruned ${new Date(m.pruned_at).toLocaleString()}`}
+                      {m.source_memory_ids?.length > 0 && ` -- merged from ${m.source_memory_ids.length} memories`}
+                    </div>
                   </div>
                 </motion.div>
               ))}

@@ -127,7 +127,7 @@ def run(turns_limit: int | None = None, checkpoint_days: list[int] | None = None
         if synapse_active and synapse_active % _settings.consolidation_trigger_every_n_writes == 0:
             logger.info("day=%d turn=%d: triggering consolidation pass (active=%d)", turn.day, turn.index, synapse_active)
             try:
-                consolidation.run_consolidation_pass(db, synapse_user_id)
+                consolidation.run_consolidation_pass(db, synapse_user_id, now=now)
                 decay.run_decay_and_prune(db, now=now)
             except Exception:
                 logger.exception("turn=%d day=%d: consolidation pass failed after retries -- skipping, continuing run", turn.index, turn.day)

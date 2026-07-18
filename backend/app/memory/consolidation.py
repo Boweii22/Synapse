@@ -61,7 +61,7 @@ def cluster_memories_by_similarity(memories: list[Memory]) -> list[list[Memory]]
     return [g for g in groups.values() if len(g) >= _settings.consolidation_min_cluster_size]
 
 
-def consolidate_clusters(db: Session, user_id: uuid.UUID) -> list[Memory]:
+def consolidate_clusters(db: Session, user_id: uuid.UUID, now: datetime | None = None) -> list[Memory]:
     """Find repeating memories -- both episodic (repeated event mentions) and
     semantic (the same stated fact/preference re-extracted on separate turns,
     worded slightly differently each time) -- and merge each cluster into one
@@ -71,8 +71,17 @@ def consolidate_clusters(db: Session, user_id: uuid.UUID) -> list[Memory]:
     it, near-duplicate semantic memories never merge, and the supersession
     pairwise-comparison pass below has to keep re-scanning an ever-growing
     pool of them on every single consolidation trigger.
+
+    `now` lets the benchmark harness backdate the consolidated memory's
+    created_at/last_recalled_at to the simulated conversation date instead of
+    the real wall clock -- without this, a consolidated summary of old,
+    simulated-months-ago facts gets stamped with today's real timestamp,
+    which both makes it look artificially fresh (undecayed) and, worse, makes
+    it sort as "newer" than genuinely current facts in
+    detect_and_retire_superseded below, potentially causing the correct fact
+    to be retired as "superseded" by the stale one instead of the reverse.
     """
-    now = datetime.now(timezone.utc)
+    now = now or datetime.now(timezone.utc)
     created: list[Memory] = []
 
     for source_type in ("episodic", "semantic"):
@@ -96,6 +105,8 @@ def consolidate_clusters(db: Session, user_id: uuid.UUID) -> list[Memory]:
                 reasoning=result.get("reasoning") or score.get("reasoning"),
                 source_memory_ids=[m.id for m in cluster],
                 salience=initial_salience(score["importance"]),
+                created_at=now,
+                last_recalled_at=now,
             )
             db.add(consolidated)
 
@@ -117,11 +128,18 @@ def consolidate_clusters(db: Session, user_id: uuid.UUID) -> list[Memory]:
     return created
 
 
-def detect_and_retire_superseded(db: Session, user_id: uuid.UUID) -> list[uuid.UUID]:
+def detect_and_retire_superseded(db: Session, user_id: uuid.UUID, now: datetime | None = None) -> list[uuid.UUID]:
     """Compare active semantic/consolidated memories pairwise (gated by embedding
     similarity to keep this cheap) and ask Qwen whether the newer one supersedes
-    the older. Retires (soft-deletes) any memory found to be superseded."""
-    now = datetime.now(timezone.utc)
+    the older. Retires (soft-deletes) any memory found to be superseded.
+
+    `now` lets the benchmark harness stamp pruned_at with the simulated date;
+    ordering "older" vs "newer" itself is based on each row's own created_at,
+    which is why consolidate_clusters above must also honor the simulated
+    `now` -- otherwise a stale fact re-summarized "today" would always sort as
+    the newer of the pair, regardless of which one is actually current.
+    """
+    now = now or datetime.now(timezone.utc)
     candidates = [
         m for m in _active_memories(db, user_id) if m.memory_type in ("semantic", "consolidated")
     ]
@@ -159,9 +177,9 @@ def detect_and_retire_superseded(db: Session, user_id: uuid.UUID) -> list[uuid.U
     return list(retired_ids)
 
 
-def run_consolidation_pass(db: Session, user_id: uuid.UUID) -> dict:
+def run_consolidation_pass(db: Session, user_id: uuid.UUID, now: datetime | None = None) -> dict:
     """The full 'sleep' pass for one user: consolidate repeating episodic
     clusters, then detect and retire superseded facts."""
-    consolidated = consolidate_clusters(db, user_id)
-    retired = detect_and_retire_superseded(db, user_id)
+    consolidated = consolidate_clusters(db, user_id, now=now)
+    retired = detect_and_retire_superseded(db, user_id, now=now)
     return {"consolidated_count": len(consolidated), "retired_count": len(retired)}

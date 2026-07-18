@@ -4,22 +4,20 @@ import BenchmarkChart from "./BenchmarkChart";
 
 const POLL_MS = 5000;
 
-function salienceBarColor(salience) {
-  if (salience > 0.6) return "#2563eb";
-  if (salience > 0.25) return "#7c9df0";
-  return "#c7d2fe";
-}
-
 export default function MemoryTimeline({ userId }) {
   const [memories, setMemories] = useState([]);
   const [error, setError] = useState(null);
   const [showBenchmark, setShowBenchmark] = useState(false);
   const [jobStatus, setJobStatus] = useState(null);
+  const [jobRunning, setJobRunning] = useState(false);
+  const [refreshing, setRefreshing] = useState(false);
 
   const refresh = useCallback(() => {
+    setRefreshing(true);
     listMemories(userId, true)
       .then(setMemories)
-      .catch((err) => setError(err.message));
+      .catch((err) => setError(err.message))
+      .finally(() => setRefreshing(false));
   }, [userId]);
 
   useEffect(() => {
@@ -35,34 +33,49 @@ export default function MemoryTimeline({ userId }) {
     .slice(0, 20);
 
   async function handleRunDecay() {
+    setJobRunning(true);
     setJobStatus("running decay job...");
     try {
       const res = await runDecay(userId);
-      setJobStatus(`decay job: recomputed ${res.detail.recomputed}, pruned ${res.detail.pruned}`);
+      setJobStatus(`decay job -- recomputed ${res.detail.recomputed}, pruned ${res.detail.pruned}`);
       refresh();
     } catch (err) {
       setJobStatus(`decay job failed: ${err.message}`);
+    } finally {
+      setJobRunning(false);
     }
   }
 
   async function handleRunConsolidation() {
+    setJobRunning(true);
     setJobStatus("running consolidation pass...");
     try {
       const res = await runConsolidation(userId);
-      setJobStatus(`consolidation: merged ${res.detail.consolidated_count} clusters, retired ${res.detail.retired_count} superseded`);
+      setJobStatus(`consolidation -- merged ${res.detail.consolidated_count} clusters, retired ${res.detail.retired_count} superseded`);
       refresh();
     } catch (err) {
       setJobStatus(`consolidation failed: ${err.message}`);
+    } finally {
+      setJobRunning(false);
     }
   }
 
   return (
     <div className="timeline-view">
       <div className="timeline-toolbar">
-        <button onClick={refresh}>Refresh</button>
-        <button onClick={handleRunDecay}>Run decay job</button>
-        <button onClick={handleRunConsolidation}>Run consolidation pass</button>
-        <button className={showBenchmark ? "toggle active" : "toggle"} onClick={() => setShowBenchmark((v) => !v)}>
+        <button className={`icon-btn ${refreshing ? "spinning" : ""}`} onClick={refresh} title="Refresh">
+          <svg width="15" height="15" viewBox="0 0 24 24" fill="none">
+            <path d="M4 4v6h6M20 20v-6h-6M4.5 15a8 8 0 0 0 14.5 3M19.5 9A8 8 0 0 0 5 6" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round" />
+          </svg>
+          Refresh
+        </button>
+        <button className="icon-btn" onClick={handleRunDecay} disabled={jobRunning}>
+          Run decay job
+        </button>
+        <button className="icon-btn" onClick={handleRunConsolidation} disabled={jobRunning}>
+          Run consolidation pass
+        </button>
+        <button className={showBenchmark ? "icon-btn toggle active" : "icon-btn toggle"} onClick={() => setShowBenchmark((v) => !v)}>
           {showBenchmark ? "Hide benchmark chart" : "Show benchmark chart"}
         </button>
       </div>
@@ -74,28 +87,31 @@ export default function MemoryTimeline({ userId }) {
 
       <div className="timeline-columns">
         <section className="timeline-column">
-          <h3>Active memories ({active.length})</h3>
+          <h3>
+            Active memories <span className="count-pill">{active.length}</span>
+          </h3>
           <div className="memory-list">
-            {active.map((m) => (
-              <div key={m.id} className="memory-card">
+            {active.map((m, i) => (
+              <div
+                key={m.id}
+                className={`memory-card ${m.memory_type}`}
+                style={{ animationDelay: `${Math.min(i, 12) * 30}ms` }}
+              >
                 <div className="memory-card-header">
                   <span className={`type-chip ${m.memory_type}`}>{m.memory_type}</span>
-                  <span className="salience-label">salience {m.salience.toFixed(3)}</span>
+                  <span className="salience-label">{m.salience.toFixed(3)}</span>
                 </div>
                 <p className="memory-content">{m.content}</p>
                 <div className="salience-bar-track">
-                  <div
-                    className="salience-bar-fill"
-                    style={{ width: `${Math.min(100, m.salience * 100)}%`, background: salienceBarColor(m.salience) }}
-                  />
+                  <div className={`salience-bar-fill ${m.memory_type}`} style={{ width: `${Math.min(100, m.salience * 100)}%` }} />
                 </div>
                 <div className="memory-meta">
-                  importance {m.importance_score.toFixed(2)} - recalled {m.recall_count}x - last recalled{" "}
+                  importance {m.importance_score.toFixed(2)} &middot; recalled {m.recall_count}&times; &middot; last{" "}
                   {new Date(m.last_recalled_at).toLocaleString()}
                 </div>
               </div>
             ))}
-            {active.length === 0 && <p className="empty-state">No active memories yet -- chat with Synapse first.</p>}
+            {active.length === 0 && <p className="empty-state-small">No active memories yet -- chat with Synapse first.</p>}
           </div>
         </section>
 
@@ -108,15 +124,15 @@ export default function MemoryTimeline({ userId }) {
                   <span className={`type-chip ${m.memory_type}`}>{m.memory_type}</span>
                   <span className={`pruned-chip ${m.pruned_reason}`}>{m.pruned_reason}</span>
                 </div>
-                <p className="memory-content">{m.content}</p>
+                <p className="memory-content strike">{m.content}</p>
                 <div className="memory-meta">
                   {m.pruned_at && `pruned ${new Date(m.pruned_at).toLocaleString()}`}
-                  {m.source_memory_ids?.length > 0 && ` - merged from ${m.source_memory_ids.length} memories`}
+                  {m.source_memory_ids?.length > 0 && ` -- merged from ${m.source_memory_ids.length} memories`}
                 </div>
               </div>
             ))}
             {recentlyChanged.length === 0 && (
-              <p className="empty-state">Nothing decayed/pruned/consolidated yet.</p>
+              <p className="empty-state-small">Nothing decayed/pruned/consolidated yet.</p>
             )}
           </div>
         </section>

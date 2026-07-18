@@ -1,15 +1,21 @@
-import { useEffect, useState } from "react";
+import { useEffect, useRef, useState } from "react";
 import { createUser } from "./api";
 import ChatView from "./components/ChatView";
 import MemoryTimeline from "./components/MemoryTimeline";
 import "./App.css";
 
 const USER_ID_STORAGE_KEY = "synapse_user_id";
+const VIEWS = [
+  { key: "chat", label: "Chat" },
+  { key: "timeline", label: "Memory Timeline" },
+];
 
 export default function App() {
   const [userId, setUserId] = useState(null);
   const [view, setView] = useState("chat");
   const [error, setError] = useState(null);
+  const tabRefs = useRef({});
+  const [indicator, setIndicator] = useState({ left: 0, width: 0 });
 
   useEffect(() => {
     const existing = localStorage.getItem(USER_ID_STORAGE_KEY);
@@ -25,6 +31,11 @@ export default function App() {
       .catch((err) => setError(err.message));
   }, []);
 
+  useEffect(() => {
+    const el = tabRefs.current[view];
+    if (el) setIndicator({ left: el.offsetLeft, width: el.offsetWidth });
+  }, [view, userId]);
+
   if (error) {
     return (
       <div className="app-shell centered">
@@ -37,7 +48,10 @@ export default function App() {
   if (!userId) {
     return (
       <div className="app-shell centered">
-        <p>Connecting to Synapse...</p>
+        <div className="boot-brand">
+          <span className="brand-dot" />
+          <span className="boot-text">Connecting to Synapse&hellip;</span>
+        </div>
       </div>
     );
   }
@@ -47,23 +61,31 @@ export default function App() {
       <header className="app-header">
         <div className="brand">
           <span className="brand-dot" />
-          Synapse
+          <span className="brand-word">Synapse</span>
         </div>
         <nav className="tabs">
-          <button className={view === "chat" ? "tab active" : "tab"} onClick={() => setView("chat")}>
-            Chat
-          </button>
-          <button className={view === "timeline" ? "tab active" : "tab"} onClick={() => setView("timeline")}>
-            Memory Timeline
-          </button>
+          <span className="tab-indicator" style={{ left: indicator.left, width: indicator.width }} />
+          {VIEWS.map((v) => (
+            <button
+              key={v.key}
+              ref={(el) => (tabRefs.current[v.key] = el)}
+              className={view === v.key ? "tab active" : "tab"}
+              onClick={() => setView(v.key)}
+            >
+              {v.label}
+            </button>
+          ))}
         </nav>
         <div className="user-id-badge" title={userId}>
-          user: {userId.slice(0, 8)}
+          <span className="badge-dot" />
+          {userId.slice(0, 8)}
         </div>
       </header>
 
       <main className="app-main">
-        {view === "chat" ? <ChatView userId={userId} /> : <MemoryTimeline userId={userId} />}
+        <div key={view} className="view-transition">
+          {view === "chat" ? <ChatView userId={userId} /> : <MemoryTimeline userId={userId} />}
+        </div>
       </main>
     </div>
   );

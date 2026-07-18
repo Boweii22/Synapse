@@ -54,26 +54,28 @@ code path.
 - [x] Consolidation + supersession detection job (`backend/app/memory/consolidation.py`)
 - [x] Naive baseline agent, same models, no decay/consolidation/pruning
       (`backend/benchmark/naive_agent.py`)
-- [x] Benchmark harness: 163-turn / 44-simulated-day synthetic conversation
+- [x] Benchmark harness: 110-turn / simulated-multi-day synthetic conversation
       log with two deliberate contradictions, LLM-judged recall scoring, chart
-      generation (`backend/benchmark/`)
-- [x] Frontend: chat view + memory timeline view with live salience, decay/
-      prune/consolidation indicators, and a benchmark-chart toggle
+      generation (`backend/benchmark/`) -- see "Methodology changes" above for
+      the disclosed reduction from the original 163-turn/9-checkpoint plan
+- [x] Frontend: chat view + memory timeline view with live salience tiers,
+      per-memory decay projections, a real vertical timeline for
+      decayed/pruned/consolidated memories, and a benchmark-chart toggle
       (`frontend/src/`)
-- [ ] **Live Qwen API verification**: every Qwen-dependent code path above is
-      written and structurally tested, but end-to-end verification against
-      the real DashScope API is pending a valid `QWEN_API_KEY` in `.env`
-- [ ] **Full benchmark run**: the harness is complete and import-verified;
-      running it end to end (and thus generating `benchmark_results.png` with
-      real numbers) is pending the live API key above
-- [ ] **Alibaba Cloud deployment**: `docker-compose.prod.yml`,
-      `frontend/Dockerfile`, and the full walkthrough in
-      `docs/ALIBABA_DEPLOYMENT.md` are ready; actually provisioning the ECS
-      instance (and optionally RDS) requires an Alibaba Cloud account, which
-      hasn't been created yet
-- [ ] **Demo video**: not recorded yet -- depends on the live deployment and
-      a completed benchmark run above being in place first, so the video shows
-      real numbers and a real recall-across-sessions demo rather than a mockup
+- [x] **Live Qwen API verification**: full isolation test suite
+      (`backend/tests/test_qwen_client.py`) passing against the real API --
+      embeddings, chat, importance scoring, extraction, contradiction
+      detection, and consolidation all confirmed working with real responses
+- [x] **Real Alibaba Cloud deployment**: backend + frontend + Postgres running
+      live on an Alibaba Cloud ECS instance, reachable and verified
+- [ ] **Full benchmark run**: harness is resilient (retries + graceful
+      degradation on malformed model responses) and actively running against
+      the real API on the ECS deployment as of this writing; final chart +
+      raw JSON pending completion
+- [ ] **Demo video**: not recorded yet -- can be recorded now for the live
+      cross-session recall + memory timeline portions independent of the
+      benchmark; the benchmark-chart segment gets spliced in once the run
+      completes
 
 ## Benchmark methodology (disclosed)
 
@@ -81,10 +83,43 @@ code path.
 through the identical synthetic conversation (`backend/benchmark/conversation_log.py`)
 at identical simulated timestamps (dates are backdated via the `now` parameter
 threaded through the write/retrieval/decay functions, rather than waiting real
-wall-clock days). At each of 9 checkpoint days it asks both agents 7 fixed
-recall questions -- including two deliberate contradictions (a city move and a
+wall-clock days). At each checkpoint day it asks both agents 7 fixed recall
+questions -- including two deliberate contradictions (a city move and a
 programming-language switch) -- and scores each reply with Qwen itself as an
 LLM judge (`qwen_client.judge_recall`), which is disclosed here as the scoring
 method rather than a hidden implementation detail. No benchmark numbers are
 included in this document until the harness has actually been run against the
 real API -- see the build status above.
+
+### Why this is a fair comparison
+
+Synapse and the naive baseline are given the identical conversation, in the
+identical order, at the identical simulated timestamps, and both use the same
+Qwen chat model and the same embedding model for every call they make. The
+*only* thing that differs between them is the memory strategy itself: Synapse
+scores importance, decays salience, consolidates repeats, and retires
+contradicted facts; the naive baseline stores every turn verbatim forever and
+retrieves by raw cosine similarity alone. Because every other variable is held
+constant, any difference in the resulting memory count, token cost, or recall
+accuracy can be attributed to the memory strategy, not to a stronger model,
+a different conversation, or a lucky random seed.
+
+### Methodology changes from the original plan (disclosed, not buried)
+
+The original design called for a 163-turn conversation, 9 recall checkpoints,
+and the `qwen3.7-plus` chat model throughout. Under real time constraints, the
+final benchmark run instead used **110 turns** (still real, sequential,
+simulated-multi-day conversation -- just shorter), **checkpoints at whichever
+of the 5 planned checkpoint days actually fall within those 110 turns**
+(day 4, day 16, and day 24 land inside a 110-turn run; days 36 and 42 do not),
+and **`qwen3.6-flash`** instead of `qwen3.7-plus` for every chat-model call in
+the benchmark, including extraction, scoring, contradiction detection,
+consolidation, and the LLM judge. This last change was applied identically to
+both agents (they share one client wrapper and one model setting), so it does
+not advantage either side -- but it is a real change to model capability, not
+merely a "reply speed" tweak, since the same chat model also drives Synapse's
+scoring/extraction/consolidation pipeline. Both contradiction events (the city
+move and the language switch) still occur within the 110-turn window, and the
+day-24 checkpoint (after both contradictions) still fires, so the core claim
+-- that Synapse gives the current answer where the naive baseline gives a
+stale one -- remains directly testable despite the reduced scope.

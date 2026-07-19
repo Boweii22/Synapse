@@ -81,7 +81,7 @@ export default function ChatView({ userId }) {
           <div className="empty-state">
             <div className="empty-orb" />
             <p className="empty-title">Say something to Synapse</p>
-            <p>It remembers across sessions -- close this tab, come back tomorrow,</p>
+            <p>Ask it something you told it before -- even after closing this tab,</p>
             <p>it'll still recall what matters, and gracefully forget what doesn't.</p>
           </div>
         )}

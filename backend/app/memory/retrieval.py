@@ -27,7 +27,23 @@ def retrieve_for_query(
     now: datetime | None = None,
     bump: bool = True,
 ) -> list[Memory]:
-    """Returns up to top_k memories, re-ranked by similarity x current salience.
+    """Returns up to top_k memories, re-ranked by relevance-gated salience.
+
+    Ranking is two-stage rather than a flat `similarity * salience` product:
+    1. Split candidates into "relevant" (cosine similarity >= relevance_floor,
+       i.e. plausibly about the same topic as the query) and the rest.
+    2. Rank the relevant group by salience alone -- once something clears the
+       relevance bar, which one matters most should be decided by how salient
+       it currently is, not further nudged by fine-grained similarity
+       differences. This avoids a failure mode found via direct benchmark
+       analysis: a frequently-recalled generic fact (name, allergy) could
+       out-rank a topically relevant but less-reinforced memory under the old
+       multiplicative scheme, simply by having much higher salience, even
+       though its similarity to the query was unremarkable.
+    3. If fewer than top_k candidates clear the relevance bar, backfill the
+       remainder from the rest, ranked by similarity * salience as before, so
+       a query with no strongly relevant memory still gets a reasonable
+       best-effort answer instead of an empty context.
 
     `now` lets the benchmark harness simulate a specific point in a multi-day
     conversation; production callers omit it and get the real current time.
@@ -53,16 +69,26 @@ def retrieve_for_query(
     if not rows:
         return []
 
-    scored: list[tuple[Memory, float]] = []
+    relevant: list[tuple[Memory, float, float]] = []  # (memory, salience, combined)
+    backfill: list[tuple[Memory, float, float]] = []
     for memory, distance in rows:
         similarity = 1.0 - float(distance)
         current_salience = compute_salience(
             memory.importance_score, memory.memory_type, memory.recall_count, memory.last_recalled_at, now
         )
-        scored.append((memory, similarity * current_salience))
+        entry = (memory, current_salience, similarity * current_salience)
+        if similarity >= _settings.retrieval_relevance_floor:
+            relevant.append(entry)
+        else:
+            backfill.append(entry)
 
-    scored.sort(key=lambda pair: pair[1], reverse=True)
-    top = scored[:top_k]
+    relevant.sort(key=lambda e: e[1], reverse=True)   # by salience alone
+    backfill.sort(key=lambda e: e[2], reverse=True)   # by similarity x salience
+
+    top = relevant[:top_k]
+    if len(top) < top_k:
+        top += backfill[: top_k - len(top)]
+    top = [(m, score) for m, _sal, score in top]
 
     if bump:
         for memory, _rank_score in top:

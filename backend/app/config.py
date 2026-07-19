@@ -40,12 +40,13 @@ class Settings(BaseSettings):
     # --- Retrieval (section 3.6) ---
     retrieval_top_n: int = 25   # candidates pulled by raw cosine similarity
     retrieval_top_k: int = 6    # final count injected into chat context after re-rank
+    retrieval_relevance_floor: float = 0.6  # min similarity to count as "about the right topic"
 
     # --- Consolidation (section 3.4) ---
     consolidation_similarity_threshold: float = 0.86
     consolidation_min_cluster_size: int = 3
     consolidation_trigger_every_n_writes: int = 20
-    supersession_similarity_gate: float = 0.75
+    supersession_similarity_gate: float = 0.55
 
     # --- App ---
     app_env: str = "development"
